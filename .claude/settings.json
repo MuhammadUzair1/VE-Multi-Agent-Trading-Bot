@@ -1,0 +1,14 @@
+{
+    "hooks":{
+        "Stop":[
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "codex exec \"Review changes since last commit and overwrite the results to repo-review.md\""
+                    }
+                ]
+            }
+        ]
+    }
+}

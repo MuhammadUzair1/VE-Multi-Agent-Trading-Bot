@@ -22,13 +22,13 @@ The user runs a single Docker command (or a provided start script). A browser op
 ### What the User Can Do
 
 - **Watch prices stream** — prices flash green (uptick) or red (downtick) with subtle CSS animations that fade
-- **View sparkline mini-charts** — price action beside each ticker in the watchlist, accumulated on the frontend from the SSE stream since page load (sparklines fill in progressively)
-- **Click a ticker** to see a larger detailed chart in the main chart area
-- **Buy and sell shares** — market orders only, instant fill at current price, no fees, no confirmation dialog
+- **View sparkline mini-charts** — price action beside each ticker in the watchlist, seeded with a short synthetic backfill on load and continuously extended from the live SSE stream
+- **Click a ticker** to see a larger detailed chart in the main chart area, seeded the same way
+- **Buy and sell shares** — market orders only, instant fill at current price, no fees, no confirmation dialog, no short selling (a sell is rejected if it exceeds the currently held quantity)
 - **Monitor their portfolio** — a heatmap (treemap) showing positions sized by weight and colored by P&L, plus a P&L chart tracking total portfolio value over time
 - **View a positions table** — ticker, quantity, average cost, current price, unrealized P&L, % change
 - **Chat with the AI assistant** — ask about their portfolio, get analysis, and have the AI execute trades and manage the watchlist through natural language
-- **Manage the watchlist** — add/remove tickers manually or via the AI chat
+- **Manage the watchlist** — add/remove tickers manually or via the AI chat, chosen from the fixed set of 10 supported tickers (§6)
 
 ### Visual Design
 
@@ -144,6 +144,15 @@ LLM_MOCK=false
 
 ## 6. Market Data
 
+### Supported Ticker Universe
+
+For this MVP, the system supports a fixed set of 10 tickers — the same 10 used to seed the default watchlist (§7): AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, JPM, V, NFLX. The watchlist is a display filter over this fixed universe, not a data-scope control:
+
+- `POST /api/watchlist` only accepts tickers from this set; anything else is rejected with a 400
+- The market data layer (simulator or Massive) keeps live prices flowing for all 10 tickers at all times, regardless of which ones are currently on the watchlist
+- Removing a ticker from the watchlist only hides it from the watchlist panel — it does not stop its price updates, so an open position in a removed ticker still shows accurate, live P&L
+- Adding new, arbitrary tickers (beyond these 10) is out of scope for this MVP
+
 ### Two Implementations, One Interface
 
 Both the simulator and the Massive client implement the same abstract interface. The backend selects which to use based on the environment variable. All downstream code (SSE streaming, price cache, frontend) is agnostic to the source.
@@ -167,16 +176,23 @@ Both the simulator and the Massive client implement the same abstract interface.
 
 ### Shared Price Cache
 
-- A single background task (simulator or Massive poller) writes to an in-memory price cache
-- The cache holds the latest price, previous price, and timestamp for each ticker
+- A single background task (simulator or Massive poller) writes to an in-memory price cache for all 10 supported tickers
+- The cache holds the latest price, previous price, timestamp, and a short rolling history buffer (the most recent ~100 points) for each ticker
 - SSE streams read from this cache and push updates to connected clients
 - This architecture supports future multi-user scenarios without changes to the data layer
+
+### Historical Backfill
+
+- On startup, the simulator fast-forwards its GBM process to pre-fill each ticker's rolling history buffer (e.g., ~100 points) so charts and sparklines never start empty
+- This backfill is served once via `GET /api/prices/{ticker}/history` (§8) for initial chart/sparkline population; the frontend then extends it live from the SSE stream
+- No historical data is persisted to the database — it's an in-memory convenience for first paint only
 
 ### SSE Streaming
 
 - Endpoint: `GET /api/stream/prices`
 - Long-lived SSE connection; client uses native `EventSource` API
-- Server pushes price updates for all tickers known to the system at a regular cadence (~500ms) — in the single-user model this is equivalent to the user's watchlist
+- Server pushes price updates for all 10 supported tickers (not just the current watchlist — see above)
+- Broadcast cadence matches the underlying source's update cadence: ~500ms with the simulator (which generates a new price every tick); with the Massive API, an update is only pushed when a poll actually changes a price (effectively the poll interval, e.g. 15s on the free tier) — no duplicate or stale events are broadcast
 - Each SSE event contains ticker, price, previous price, timestamp, and change direction
 - Client handles reconnection automatically (EventSource has built-in retry)
 
@@ -219,6 +235,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 - `avg_cost` REAL
 - `updated_at` TEXT (ISO timestamp)
 - UNIQUE constraint on `(user_id, ticker)`
+- When a sell reduces `quantity` to exactly zero, the row is deleted rather than retained at zero
 
 **trades** — Trade history (append-only log)
 
@@ -257,9 +274,10 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 
 ### Market Data
 
-| Method | Path                 | Description                      |
-| ------ | -------------------- | -------------------------------- |
-| GET    | `/api/stream/prices` | SSE stream of live price updates |
+| Method | Path                            | Description                                                     |
+| ------ | -------------------------------- | ---------------------------------------------------------------- |
+| GET    | `/api/stream/prices`             | SSE stream of live price updates                                  |
+| GET    | `/api/prices/{ticker}/history`   | Short in-memory backfill for initial chart/sparkline population   |
 
 ### Portfolio
 
@@ -274,14 +292,15 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 | Method | Path                      | Description                                  |
 | ------ | ------------------------- | -------------------------------------------- |
 | GET    | `/api/watchlist`          | Current watchlist tickers with latest prices |
-| POST   | `/api/watchlist`          | Add a ticker: `{ticker}`                     |
+| POST   | `/api/watchlist`          | Add a ticker: `{ticker}` — must be one of the 10 supported tickers (§6); otherwise 400 |
 | DELETE | `/api/watchlist/{ticker}` | Remove a ticker                              |
 
 ### Chat
 
-| Method | Path        | Description                                                                 |
-| ------ | ----------- | --------------------------------------------------------------------------- |
-| POST   | `/api/chat` | Send a message, receive complete JSON response (message + executed actions) |
+| Method | Path        | Description                                                                          |
+| ------ | ----------- | ------------------------------------------------------------------------------------- |
+| GET    | `/api/chat` | Last 10 chat messages, used to restore the conversation on page load                   |
+| POST   | `/api/chat` | Send a message, receive complete JSON response (message + executed actions)           |
 
 ### System
 
@@ -302,7 +321,7 @@ There is an OPENROUTER_API_KEY in the .env file in the project root.
 When the user sends a chat message, the backend:
 
 1. Loads the user's current portfolio context (cash, positions with P&L, watchlist with live prices, total portfolio value)
-2. Loads recent conversation history from the `chat_messages` table
+2. Loads the last 10 messages from the `chat_messages` table
 3. Constructs a prompt with a system message, portfolio context, conversation history, and the user's new message
 4. Calls the LLM via LiteLLM → OpenRouter, requesting structured output, using the cerebras-inference skill
 5. Parses the complete structured JSON response
@@ -318,13 +337,13 @@ The LLM is instructed to respond with JSON matching this schema:
 {
   "message": "Your conversational response to the user",
   "trades": [{ "ticker": "AAPL", "side": "buy", "quantity": 10 }],
-  "watchlist_changes": [{ "ticker": "PYPL", "action": "add" }]
+  "watchlist_changes": [{ "ticker": "NFLX", "action": "remove" }]
 }
 ```
 
 - `message` (required): The conversational text shown to the user
 - `trades` (optional): Array of trades to auto-execute. Each trade goes through the same validation as manual trades (sufficient cash for buys, sufficient shares for sells)
-- `watchlist_changes` (optional): Array of watchlist modifications
+- `watchlist_changes` (optional): Array of watchlist modifications, restricted to the 10 supported tickers (§6)
 
 ### Auto-Execution
 
@@ -333,6 +352,12 @@ Trades specified by the LLM execute automatically — no confirmation dialog. Th
 - It's a simulated environment with fake money, so the stakes are zero
 - It creates an impressive, fluid demo experience
 - It demonstrates agentic AI capabilities — the core theme of the course
+
+Every trade — manual or LLM-initiated — goes through the same validation rules:
+
+- Buys are rejected if they would exceed the available cash balance (no margin)
+- Sells are rejected if the quantity exceeds the currently held quantity (no short selling)
+- Trades are restricted to the 10 supported tickers (§6)
 
 If a trade fails validation (e.g., insufficient cash), the error is included in the chat response so the LLM can inform the user.
 
@@ -363,13 +388,13 @@ When `LLM_MOCK=true`, the backend returns deterministic mock responses instead o
 
 The frontend is a single-page application with a dense, terminal-inspired layout. The specific component architecture and layout system is up to the Frontend Engineer, but the UI should include these elements:
 
-- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), daily change %, and a sparkline mini-chart (accumulated from SSE since page load)
-- **Main chart area** — larger chart for the currently selected ticker, with at minimum price over time. Clicking a ticker in the watchlist selects it here.
+- **Watchlist panel** — grid/table of watched tickers with: ticker symbol, current price (flashing green/red on change), daily change %, and a sparkline mini-chart (seeded from the history backfill, then extended live from SSE)
+- **Main chart area** — larger chart for the currently selected ticker, with at minimum price over time, seeded the same way. Clicking a ticker in the watchlist selects it here.
 - **Portfolio heatmap** — treemap visualization where each rectangle is a position, sized by portfolio weight, colored by P&L (green = profit, red = loss)
 - **P&L chart** — line chart showing total portfolio value over time, using data from `portfolio_snapshots`
 - **Positions table** — tabular view of all positions: ticker, quantity, avg cost, current price, unrealized P&L, % change
 - **Trade bar** — simple input area: ticker field, quantity field, buy button, sell button. Market orders, instant fill.
-- **AI chat panel** — docked/collapsible sidebar. Message input, scrolling conversation history, loading indicator while waiting for LLM response. Trade executions and watchlist changes shown inline as confirmations.
+- **AI chat panel** — docked/collapsible sidebar. Message input, scrolling conversation history (restored on load via `GET /api/chat`), loading indicator while waiting for LLM response. Trade executions and watchlist changes shown inline as confirmations.
 - **Header** — portfolio total value (updating live), connection status indicator, cash balance
 
 ### Technical Notes
