@@ -86,7 +86,7 @@ The user runs a single Docker command (or a provided start script). A browser op
 ## 4. Directory Structure
 
 ```
-finally/
+Final Project/
 ├── frontend/                 # Next.js TypeScript project (static export)
 ├── backend/                  # FastAPI uv project (Python)
 │   └── db/                   # Schema definitions, seed data, migration logic
