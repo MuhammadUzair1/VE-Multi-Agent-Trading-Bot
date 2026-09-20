@@ -6,7 +6,7 @@ Capstone project for an agentic AI coding course — built by orchestrated codin
 
 ## Status
 
-📋 **Planning phase.** The product spec, market-data subsystem design, and consolidated architecture are written and reviewed. No application code exists yet — `backend/`, `frontend/`, `test/`, and `scripts/` are placeholder directories in this repo, not scaffolds. Nothing is runnable yet.
+📋 **Planning phase.** The product spec, market-data subsystem design, and consolidated architecture are written and reviewed. `frontend/` now has a nominal Next.js scaffold (UI shell wired to the planned `/api/*` contract; the backend doesn't exist yet, so it degrades gracefully with placeholder data). `backend/`, `test/`, and `scripts/` are still placeholder directories.
 
 ## Stack (planned)
 
@@ -22,7 +22,7 @@ Capstone project for an agentic AI coding course — built by orchestrated codin
 
 ```
 backend/     Reserved for the FastAPI app (uv project) — not yet implemented
-frontend/    Reserved for the Next.js app (static export) — not yet implemented
+frontend/    Next.js app (static export) — nominal UI scaffold, awaiting the backend
 planning/    Project spec and design docs for agents — start with planning/PLAN.md
 test/        Reserved for Playwright E2E tests — not yet implemented
 db/          Runtime volume mount for the SQLite file (gitignored, created at runtime)
@@ -53,14 +53,25 @@ LLM_MOCK=false        # optional — deterministic mock LLM responses for testin
 
 ## Running
 
-Not yet available. Once the Docker build and start scripts exist:
+The full stack (Docker build and start scripts) isn't available yet:
 
 ```bash
 ./scripts/start_mac.sh          # macOS/Linux
 ./scripts/start_windows.ps1     # Windows
 ```
 
-will open the app at `http://localhost:8000` with no login required.
+will eventually open the app at `http://localhost:8000` with no login required.
+
+### Frontend only (in the meantime)
+
+`frontend/` is a standalone Next.js project you can run today. It renders the full terminal UI against the planned `/api/*` contract; without a backend running, API calls fail gracefully and the UI falls back to placeholder state ($10k cash, the 10 default tickers, no live prices).
+
+```bash
+cd frontend
+npm install
+npm run dev      # http://localhost:3000
+npm run build    # static export to frontend/out, per PLAN.md §3/§11
+```
 
 ## Known Open Issues
 
